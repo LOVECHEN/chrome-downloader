@@ -1,0 +1,236 @@
+name: Daily Chrome Download
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # UTC 06:00 = 北京 14:00
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Channel to download (stable/beta/dev/all)'
+        required: false
+        default: 'all'
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        channel: [stable, beta, dev]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Filter channel
+        id: filter
+        run: |
+          INPUT_CHANNEL="${{ github.event.inputs.channel || 'all' }}"
+          if [[ "$INPUT_CHANNEL" != "all" && "$INPUT_CHANNEL" != "${{ matrix.channel }}" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⏭ Skipping ${{ matrix.channel }} (requested: $INPUT_CHANNEL)"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Query latest version
+        if: steps.filter.outputs.skip != 'true'
+        id: version
+        run: |
+          CHANNEL="${{ matrix.channel }}"
+          API_BASE="https://versionhistory.googleapis.com/v1/chrome/platforms"
+
+          # Query version for each platform (deduplicate: linux covers both deb/rpm)
+          # Use win64 as canonical version source
+          API_URL="${API_BASE}/win64/channels/${CHANNEL}/versions/all/releases?filter=endtime=none&order_by=version%20desc"
+
+          echo "📡 Querying ${CHANNEL} version..."
+          RESPONSE=$(curl -sf "$API_URL")
+
+          if [ -z "$RESPONSE" ]; then
+            echo "❌ Failed to query version API"
+            exit 1
+          fi
+
+          # Extract version: prefer fraction>=1 && pinnable, fallback to first
+          VERSION=$(echo "$RESPONSE" | jq -r '
+            [.releases[] | select(.fraction >= 1 and .pinnable)] | first // .releases[0]
+            | .version')
+          DATE=$(echo "$RESPONSE" | jq -r '
+            [.releases[] | select(.fraction >= 1 and .pinnable)] | first // .releases[0]
+            | .serving.startTime | split("T")[0]')
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "❌ No version found for ${CHANNEL}"
+            exit 1
+          fi
+
+          TAG="${CHANNEL}-${VERSION}"
+          echo "✅ ${CHANNEL}: ${VERSION} (${DATE})"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if release exists
+        if: steps.filter.outputs.skip != 'true'
+        id: check
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "⏭ Release ${TAG} already exists, skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "🆕 New version: ${TAG}"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all platforms
+        if: steps.filter.outputs.skip != 'true' && steps.check.outputs.exists != 'true'
+        id: download
+        run: |
+          CHANNEL="${{ matrix.channel }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          DIR="release-${TAG}"
+          mkdir -p "$DIR"
+
+          # URL map
+          declare -A URLS
+          case "$CHANNEL" in
+            stable)
+              URLS[win64]="https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi"
+              URLS[win32]="https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise.msi"
+              URLS[mac]="https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg"
+              URLS[linux-deb]="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+              URLS[linux-rpm]="https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
+              ;;
+            beta)
+              URLS[win64]="https://dl.google.com/chrome/install/beta/googlechromebetastandaloneenterprise64.msi"
+              URLS[win32]="https://dl.google.com/chrome/install/beta/googlechromebetastandaloneenterprise.msi"
+              URLS[mac]="https://dl.google.com/chrome/mac/universal/beta/googlechromebeta.dmg"
+              URLS[linux-deb]="https://dl.google.com/linux/direct/google-chrome-beta_current_amd64.deb"
+              URLS[linux-rpm]="https://dl.google.com/linux/direct/google-chrome-beta_current_x86_64.rpm"
+              ;;
+            dev)
+              URLS[win64]="https://dl.google.com/chrome/install/dev/googlechromedevstandaloneenterprise64.msi"
+              URLS[win32]="https://dl.google.com/chrome/install/dev/googlechromedevstandaloneenterprise.msi"
+              URLS[mac]="https://dl.google.com/chrome/mac/universal/dev/googlechromedev.dmg"
+              URLS[linux-deb]="https://dl.google.com/linux/direct/google-chrome-unstable_current_amd64.deb"
+              URLS[linux-rpm]="https://dl.google.com/linux/direct/google-chrome-unstable_current_x86_64.rpm"
+              ;;
+          esac
+
+          # File naming
+          declare -A EXTS
+          EXTS[win64]=".msi"
+          EXTS[win32]=".msi"
+          EXTS[mac]=".dmg"
+          EXTS[linux-deb]=".deb"
+          EXTS[linux-rpm]=".rpm"
+
+          FAILED=0
+          for PLATFORM in win64 win32 mac linux-deb linux-rpm; do
+            URL="${URLS[$PLATFORM]}"
+            EXT="${EXTS[$PLATFORM]}"
+            FILENAME="chrome-${CHANNEL}-${PLATFORM}${EXT}"
+            DEST="${DIR}/${FILENAME}"
+
+            echo ""
+            echo "📥 Downloading ${PLATFORM}..."
+            echo "   URL: ${URL}"
+
+            if curl -fL --retry 3 --retry-delay 5 -o "$DEST" "$URL"; then
+              SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null)
+              SIZE_MB=$((SIZE / 1048576))
+              echo "   ✅ ${FILENAME} (${SIZE_MB} MB)"
+            else
+              echo "   ❌ Failed to download ${PLATFORM}"
+              rm -f "$DEST"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          if [ "$FAILED" -eq 5 ]; then
+            echo "❌ All downloads failed"
+            exit 1
+          fi
+
+          echo ""
+          echo "dir=${DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate checksums
+        if: steps.filter.outputs.skip != 'true' && steps.check.outputs.exists != 'true'
+        run: |
+          DIR="${{ steps.download.outputs.dir }}"
+          cd "$DIR"
+          sha256sum * > checksums.sha256
+          echo "📋 Checksums:"
+          cat checksums.sha256
+
+      - name: Create GitHub Release
+        if: steps.filter.outputs.skip != 'true' && steps.check.outputs.exists != 'true'
+        run: |
+          CHANNEL="${{ matrix.channel }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          DATE="${{ steps.version.outputs.date }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          DIR="${{ steps.download.outputs.dir }}"
+
+          # Channel display name
+          case "$CHANNEL" in
+            stable) CH_NAME="正式版 (Stable)" ;;
+            beta)   CH_NAME="测试版 (Beta)" ;;
+            dev)    CH_NAME="开发版 (Dev)" ;;
+          esac
+
+          # Build release notes
+          NOTES="## Chrome ${CH_NAME} ${VERSION}
+
+📅 发布日期: ${DATE}
+🔖 渠道: ${CH_NAME}
+
+### 下载文件
+
+| 平台 | 文件 |
+|------|------|"
+
+          for f in "$DIR"/chrome-*; do
+            FNAME=$(basename "$f")
+            SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+            SIZE_MB=$((SIZE / 1048576))
+
+            case "$FNAME" in
+              *win64*) PLAT="Windows 64-bit" ;;
+              *win32*) PLAT="Windows 32-bit" ;;
+              *mac*)   PLAT="macOS (Universal)" ;;
+              *linux-deb*) PLAT="Linux (.deb)" ;;
+              *linux-rpm*) PLAT="Linux (.rpm)" ;;
+              *) PLAT="Other" ;;
+            esac
+
+            NOTES="${NOTES}
+| ${PLAT} | \`${FNAME}\` (${SIZE_MB} MB) |"
+          done
+
+          NOTES="${NOTES}
+
+### SHA256 校验
+\`\`\`
+$(cat "${DIR}/checksums.sha256")
+\`\`\`
+
+---
+> 🤖 自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')
+> 📡 数据源: [Google VersionHistory API](https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/${CHANNEL}/versions/all/releases)"
+
+          echo "📦 Creating release: ${TAG}"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Chrome ${CH_NAME} ${VERSION}" \
+            --notes "$NOTES" \
+            "$DIR"/*
+
+          echo "✅ Release created: ${TAG}"

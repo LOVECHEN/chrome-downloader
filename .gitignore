@@ -1,0 +1,7 @@
+downloads/
+chrome-downloader
+*.dmg
+*.msi
+*.deb
+*.rpm
+.DS_Store
