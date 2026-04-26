@@ -2,11 +2,11 @@
 
 自动镜像 Chrome 全平台离线安装包到 GitHub Release，每日更新。
 
-[![Daily Chrome Download](https://github.com/LOVECHEN/chrome-downloader/actions/workflows/daily-download.yml/badge.svg)](https://github.com/LOVECHEN/chrome-downloader/actions/workflows/daily-download.yml)
+[![Daily Chrome Download](https://github.com/LOVECHEN/chrome-release/actions/workflows/daily-download.yml/badge.svg)](https://github.com/LOVECHEN/chrome-release/actions/workflows/daily-download.yml)
 
 ## 下载
 
-前往 [Releases](https://github.com/LOVECHEN/chrome-downloader/releases) 页面下载对应平台的安装包。
+前往 [Releases](https://github.com/LOVECHEN/chrome-release/releases) 页面下载对应平台的安装包。
 
 ### 支持平台
 
