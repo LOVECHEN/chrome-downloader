@@ -187,16 +187,19 @@ jobs:
             dev)    CH_NAME="开发版 (Dev)" ;;
           esac
 
-          # Build release notes
-          NOTES="## Chrome ${CH_NAME} ${VERSION}
-
-📅 发布日期: ${DATE}
-🔖 渠道: ${CH_NAME}
-
-### 下载文件
-
-| 平台 | 文件 |
-|------|------|"
+          # Build release notes to file (avoid YAML pipe conflicts)
+          NOTES_FILE="release-notes.md"
+          {
+            echo "## Chrome ${CH_NAME} ${VERSION}"
+            echo ""
+            echo "📅 发布日期: ${DATE}"
+            echo "🔖 渠道: ${CH_NAME}"
+            echo ""
+            echo "### 下载文件"
+            echo ""
+            printf "| 平台 | 文件 |\n"
+            printf "|------|------|\n"
+          } > "$NOTES_FILE"
 
           for f in "$DIR"/chrome-*; do
             FNAME=$(basename "$f")
@@ -212,26 +215,27 @@ jobs:
               *) PLAT="Other" ;;
             esac
 
-            NOTES="${NOTES}
-| ${PLAT} | \`${FNAME}\` (${SIZE_MB} MB) |"
+            printf "| %s | \`%s\` (%d MB) |\n" "$PLAT" "$FNAME" "$SIZE_MB" >> "$NOTES_FILE"
           done
 
-          NOTES="${NOTES}
-
-### SHA256 校验
-\`\`\`
-$(cat "${DIR}/checksums.sha256")
-\`\`\`
-
----
-> 🤖 自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')
-> 📡 数据源: [Google VersionHistory API](https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/${CHANNEL}/versions/all/releases)"
+          {
+            echo ""
+            echo "### SHA256 校验"
+            echo '```'
+            cat "${DIR}/checksums.sha256"
+            echo '```'
+            echo ""
+            echo "---"
+            echo "> 🤖 自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "> 📡 数据源: [Google VersionHistory API](https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/${CHANNEL}/versions/all/releases)"
+          } >> "$NOTES_FILE"
 
           echo "📦 Creating release: ${TAG}"
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Chrome ${CH_NAME} ${VERSION}" \
-            --notes "$NOTES" \
+            --notes-file "$NOTES_FILE" \
             "$DIR"/*
 
           echo "✅ Release created: ${TAG}"
+
