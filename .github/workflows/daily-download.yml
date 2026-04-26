@@ -1,4 +1,5 @@
 name: Daily Chrome Download
+# Auto-mirror Chrome offline installers to GitHub Releases
 
 on:
   schedule:
